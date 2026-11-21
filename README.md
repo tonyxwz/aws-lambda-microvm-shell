@@ -13,9 +13,17 @@ pi (your laptop)  ──HTTPS + JWE token + per-VM secret──►  MicroVM endp
 ## Install
 
 ```bash
-pi install git:github.com/tonyxwz/aws-lambda-microvm-shell
-# or try it once:  pi -e git:github.com/tonyxwz/aws-lambda-microvm-shell
+pi install npm:pi-lambda-microvm
 ```
+
+The extension replaces the agent's tools in **every** session it is loaded in. You can limit it:
+
+```bash
+pi install -l npm:pi-lambda-microvm    # this project only (.pi/settings.json, after project trust)
+pi -e npm:pi-lambda-microvm            # this run only, nothing saved
+```
+
+Pin a version with `npm:pi-lambda-microvm@0.1.0`. Update with `pi update --extensions`.
 
 Then, in pi:
 
@@ -92,7 +100,7 @@ There is one exception: skill files listed in the system prompt (`<skills>`) are
 ## Uninstall
 
 ```bash
-pi remove git:github.com/tonyxwz/aws-lambda-microvm-shell
+pi remove npm:pi-lambda-microvm
 aws lambda-microvms delete-microvm-image --image-identifier <microvmArn>
 aws iam delete-role-policy --role-name PiMicrovmBuildRole --policy-name pi-mvm-build
 aws iam delete-role --role-name PiMicrovmBuildRole
