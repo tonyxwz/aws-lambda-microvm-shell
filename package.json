@@ -2,14 +2,33 @@
   "name": "pi-lambda-microvm",
   "version": "0.1.0",
   "description": "pi extension: replace the agent's local shell and file tools with an isolated AWS Lambda MicroVM",
-  "keywords": ["pi-package", "pi-extension", "aws", "lambda", "microvm", "firecracker", "sandbox"],
-  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "aws",
+    "lambda",
+    "microvm",
+    "firecracker",
+    "sandbox"
+  ],
+  "license": "Apache-2.0",
   "type": "module",
-  "repository": { "type": "git", "url": "git+https://github.com/tonyxwz/aws-lambda-microvm-shell.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tonyxwz/aws-lambda-microvm-shell.git"
+  },
   "homepage": "https://github.com/tonyxwz/aws-lambda-microvm-shell#readme",
-  "files": ["extension/*.ts", "image/", "README.md"],
+  "files": [
+    "extension/*.ts",
+    "image/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "pi": {
-    "extensions": ["./extension/index.ts"]
+    "extensions": [
+      "./extension/index.ts"
+    ]
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.1175.0",

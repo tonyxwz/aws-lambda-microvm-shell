@@ -98,3 +98,7 @@ aws iam delete-role-policy --role-name PiMicrovmBuildRole --policy-name pi-mvm-b
 aws iam delete-role --role-name PiMicrovmBuildRole
 aws s3 rb s3://pi-mvm-artifacts-<account>-<region> --force
 ```
+
+## License
+
+[Apache-2.0](LICENSE)
