@@ -18,8 +18,10 @@ import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 
 export interface MicrovmConfig {
 	region?: string;
-	/** MicroVM image name or ARN. */
+	/** MicroVM image name or ARN. Empty = not set up. */
 	image: string;
+	/** Pin RunMicrovm to this image version (default: latest active). */
+	imageVersion?: string;
 	maxIdleSeconds: number;
 	suspendedSeconds: number;
 	maxDurationSeconds: number;
@@ -73,7 +75,7 @@ function isNotFound(err: unknown): boolean {
 }
 
 export class Microvm {
-	readonly client: LambdaMicrovmsClient;
+	client: LambdaMicrovmsClient;
 	private region?: string;
 	private identity?: MicrovmIdentity;
 	private endpoint?: string;
@@ -100,8 +102,20 @@ export class Microvm {
 		return this.cfg.image;
 	}
 
-	set image(value: string) {
-		this.cfg.image = value;
+	get imageVersion(): string | undefined {
+		return this.cfg.imageVersion;
+	}
+
+	/** Change the image used for future launches. The region defaults to the one in the image ARN. */
+	configure(image: string, imageVersion?: string, region?: string) {
+		this.cfg.image = image;
+		this.cfg.imageVersion = imageVersion;
+		const r = region ?? (image.startsWith("arn:") ? image.split(":")[3] : undefined) ?? this.cfg.region;
+		if (r && r !== this.cfg.region) {
+			this.cfg.region = r;
+			this.region = undefined;
+			this.client = new LambdaMicrovmsClient({ region: r });
+		}
 	}
 
 	get identityInfo(): MicrovmIdentity | undefined {
@@ -149,6 +163,11 @@ export class Microvm {
 	}
 
 	private async launch(signal?: AbortSignal, reason?: string): Promise<void> {
+		if (!this.cfg.image) {
+			throw new Error(
+				"Lambda MicroVM is not set up: no MicroVM image configured. Ask the user to run /mvm init (or set extensionSettings.microvmArn).",
+			);
+		}
 		const replaced = this.identity?.microvmId;
 		this.onEvent({ type: "status", text: "launching MicroVM…" });
 		const secret = randomBytes(32).toString("base64url");
@@ -157,6 +176,7 @@ export class Microvm {
 		const res = await this.client.send(
 			new RunMicrovmCommand({
 				imageIdentifier: await this.imageArn(),
+				imageVersion: this.cfg.imageVersion,
 				ingressNetworkConnectors: [await this.connectorArn("HTTP_INGRESS")],
 				egressNetworkConnectors: egress,
 				idlePolicy: {

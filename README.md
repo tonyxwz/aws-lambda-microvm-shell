@@ -6,27 +6,45 @@ has **no access to your machine**. `bash`, `read`, `write`, `edit`, `ls`, `find`
 all run in the MicroVM at `/workspace`.
 
 ```
-pi (your laptop)  ──HTTPS + JWE token + per-VM secret──►  MicroVM endpoint :8080  ──►  server.js (exec / fs)
+pi (your laptop)  ──HTTPS + JWE token + per-VM secret──►  MicroVM endpoint :8080  ──►  image/server.js (exec / fs)
    └─ AWS SDK: RunMicrovm / GetMicrovm / Suspend / Resume / Terminate / CreateMicrovmAuthToken
 ```
 
-## Setup
+## Install
 
 ```bash
-AWS_REGION=us-east-2 ./scripts/build-image.sh     # bucket + build role + MicroVM image (≈2 min)
-(cd extension && npm install)
-pi -e ./extension                                  # or symlink ./extension into ~/.pi/agent/extensions/
+pi install git:github.com/tonyxwz/aws-lambda-microvm-shell
+# or try it once:  pi -e git:github.com/tonyxwz/aws-lambda-microvm-shell
 ```
 
-`build-image.sh` writes the image ARN into `~/.pi/agent/settings.json`:
+Then, in pi:
+
+```
+/mvm init
+```
+
+`/mvm init` uses your normal AWS credentials (`AWS_PROFILE`, SSO, env vars, …). It shows what it will create
+and asks before doing anything:
+
+- an S3 bucket `pi-mvm-artifacts-<account>-<region>` for the code artifact
+- an IAM role `PiMicrovmBuildRole` that Lambda assumes during the build (S3 read and CloudWatch logs only)
+- a MicroVM image `pi-agent-sandbox`. Lambda builds the bundled [`image/Dockerfile`](image/Dockerfile) remotely
+  (Amazon Linux 2023, the current Node.js LTS, python3, git, jq, …), so you don't need Docker.
+
+The result is saved to `~/.pi/agent/settings.json`, and every later session launches from that image version:
 
 ```json
-{ "extensionSettings": { "microvmArn": "arn:aws:lambda:us-east-2:123456789012:microvm-image:pi-agent-sandbox" } }
+{
+  "extensionSettings": {
+    "microvmArn": "arn:aws:lambda:us-east-2:123456789012:microvm-image:pi-agent-sandbox",
+    "microvmImage": { "version": "1.0", "region": "us-east-2", "architecture": "ARM_64", "memoryMiB": 2048, "nodeVersion": "lts", "builtAt": "…" }
+  }
+}
 ```
 
-The image is Amazon Linux 2023 with the current **Node.js LTS** from nodejs.org (resolved at build time, or
-pin it with the `NODE_VERSION` build arg in `image/Dockerfile`), plus python3, git, jq and the usual CLI tools.
-The agent can install more with `dnf`, `pip` or `npm`.
+Options: `/mvm init [--region R] [--arch arm64|x86_64] [--memory 512|1024|2048|4096|8192] [--name N] [--node lts|vX.Y.Z]`.
+Run it again to rebuild, for example to pick up a new Node.js LTS or base-image patches. Then run `/mvm new`
+to switch the current session to the new image.
 
 ## Sharing data
 
@@ -43,7 +61,7 @@ There is one exception: skill files listed in the system prompt (`<skills>`) are
 
 ## Lifecycle
 
-- One MicroVM per pi session. Its id and secret are saved in the session, so `pi --resume` reattaches to it.
+- One MicroVM per pi session. Its id and secret are saved in the session file, so `pi --resume` reattaches to it.
 - It suspends after `PI_MVM_IDLE_SECONDS` (900) without traffic and resumes automatically on the next tool call.
   Long commands send heartbeats, so they don't count as idle.
 - On exit pi suspends it (`PI_MVM_ON_EXIT=suspend|terminate|keep`). It is terminated after
@@ -55,10 +73,11 @@ There is one exception: skill files listed in the system prompt (`<skills>`) are
 
 | Setting / env | Default |
 |---|---|
-| `extensionSettings.microvmArn` / `PI_MVM_IMAGE` (env wins) | `pi-agent-sandbox` in the current account |
-| `AWS_REGION`, `AWS_PROFILE` (standard SDK credential chain) | |
+| `extensionSettings.microvmArn` / `microvmImage` | written by `/mvm init` |
+| `PI_MVM_IMAGE` (image ARN; overrides the settings and uses the latest version) | |
 | `PI_MVM_EGRESS` (`INTERNET_EGRESS`, a VPC connector ARN, or `none`) | `INTERNET_EGRESS` |
 | `PI_MVM_EXECUTION_ROLE_ARN` (AWS permissions *inside* the VM) | none |
+| `PI_MVM_IDLE_SECONDS` / `PI_MVM_SUSPENDED_SECONDS` / `PI_MVM_MAX_DURATION_SECONDS` | 900 / 28800 / 28800 |
 
 ## Security notes
 
@@ -66,5 +85,16 @@ There is one exception: skill files listed in the system prompt (`<skills>`) are
 - The MicroVM has no AWS credentials unless you set an execution role.
 - Each request needs a Lambda JWE token, scoped to port 8080 and valid for 60 minutes, plus a 256-bit secret that
   is delivered through the `/run` hook payload. The hook port (9000) is never included in the tokens.
+- The MicroVM has outbound internet access by default. Set `PI_MVM_EGRESS=none` to remove it.
 - Throughput through the endpoint is about 0.5 MB/s from a laptop. For large datasets, give the VM an
   execution role and pull from S3.
+
+## Uninstall
+
+```bash
+pi remove git:github.com/tonyxwz/aws-lambda-microvm-shell
+aws lambda-microvms delete-microvm-image --image-identifier <microvmArn>
+aws iam delete-role-policy --role-name PiMicrovmBuildRole --policy-name pi-mvm-build
+aws iam delete-role --role-name PiMicrovmBuildRole
+aws s3 rb s3://pi-mvm-artifacts-<account>-<region> --force
+```

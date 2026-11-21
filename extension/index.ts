@@ -24,8 +24,9 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
+	getAgentDir,
 	type BashOperations,
 	createBashToolDefinition,
 	createEditToolDefinition,
@@ -46,6 +47,7 @@ import {
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { describePlan, executeInit, INIT_USAGE, parseInitArgs, planInit, type SavedImage, saveInitResult } from "./init.ts";
 import { HttpError, Microvm, type MicrovmIdentity, UPLOAD_CHUNK, UPLOAD_PARALLEL } from "./microvm.ts";
 
 const execFileP = promisify(execFile);
@@ -109,15 +111,17 @@ function remoteCtx<T extends { cwd: string }>(ctx: T): T {
 	});
 }
 
-const DEFAULT_IMAGE = "pi-agent-sandbox";
+/** Empty = not set up yet; the user runs /mvm init. */
+const DEFAULT_IMAGE = "";
+const SUBCOMMANDS = ["init", "status", "suspend", "resume", "terminate", "new"];
 
-/** Image ARN from settings.json: extensionSettings.microvmArn (or extensionSettings["pi-lambda-microvm"].microvmArn). */
-function imageFromSettings(settings: unknown): string | undefined {
+/** Image written by /mvm init: extensionSettings.microvmArn + extensionSettings.microvmImage. */
+function imageFromSettings(settings: unknown): { arn: string; image?: Partial<SavedImage> } | undefined {
 	const ext = (settings as { extensionSettings?: Record<string, unknown> })?.extensionSettings;
-	const flat = ext?.microvmArn;
-	const scoped = (ext?.["pi-lambda-microvm"] as { microvmArn?: unknown } | undefined)?.microvmArn;
-	const v = typeof flat === "string" ? flat : typeof scoped === "string" ? scoped : undefined;
-	return v?.trim() || undefined;
+	const arn = typeof ext?.microvmArn === "string" ? ext.microvmArn.trim() : "";
+	if (!arn) return undefined;
+	const image = ext?.microvmImage && typeof ext.microvmImage === "object" ? (ext.microvmImage as Partial<SavedImage>) : undefined;
+	return { arn, image };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -396,29 +400,94 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function download(remotePath: string, localPath: string | undefined) {
+	/**
+	 * Download from the VM. The VM is agent-controlled, so its data is untrusted: archives are listed and
+	 * extracted into a private staging dir first, then symlinks, hardlinks and special files are dropped
+	 * before anything is copied into the user's directory. Existing local paths are only replaced after
+	 * confirmOverwrite() agrees.
+	 */
+	async function download(
+		remotePath: string,
+		localPath: string | undefined,
+		confirmOverwrite: (target: string) => Promise<boolean>,
+	) {
 		const src = toRemote(remotePath);
+		const name = path.posix.basename(src);
+		if (!name || name === "." || name === "..") throw new Error(`Refusing to download ${src}`);
 		const st = await fsCall(src, () => mvm.stat(src));
+		const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
+
 		if (st.type === "dir") {
 			const destDir = path.resolve(localCwd, expandHome(localPath ?? "."));
-			await fs.mkdir(destDir, { recursive: true });
-			const res = await mvm.tarStream(src);
-			const tmp = path.join(os.tmpdir(), `pi-mvm-${randomBytes(6).toString("hex")}.tgz`);
+			const target = path.join(destDir, name);
+			if ((await exists(target)) && !(await confirmOverwrite(target))) throw new Error("cancelled: target exists");
+			const staging = await fs.mkdtemp(path.join(os.tmpdir(), "pi-mvm-dl-"));
 			try {
-				await pipeline(Readable.fromWeb(res.body as never), createWriteStream(tmp));
-				await execFileP("tar", ["-xzf", tmp, "-C", destDir]);
-				return { kind: "directory" as const, remote: src, local: path.join(destDir, path.posix.basename(src)) };
+				const tgz = path.join(staging, "archive.tgz");
+				const res = await mvm.tarStream(src);
+				await pipeline(Readable.fromWeb(res.body as never), createWriteStream(tgz, { mode: 0o600 }));
+				const { stdout } = await execFileP("tar", ["-tzf", tgz], { maxBuffer: 256 * 1024 * 1024 });
+				for (const entry of stdout.split("\n").filter(Boolean)) {
+					const parts = entry.split("/");
+					if (entry.startsWith("/") || parts.includes("..") || (parts[0] !== name && parts[0] !== ".")) {
+						throw new Error(`Refusing archive with unsafe entry: ${entry}`);
+					}
+				}
+				const out = path.join(staging, "out");
+				await fs.mkdir(out);
+				await execFileP("tar", ["-xzf", tgz, "-C", out, "--no-same-owner"]);
+				const dropped: string[] = [];
+				const sanitize = async (dir: string) => {
+					for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+						const p = path.join(dir, e.name);
+						if (e.isDirectory()) await sanitize(p);
+						else if (!e.isFile()) {
+							dropped.push(path.relative(out, p));
+							await fs.rm(p, { force: true });
+						} else {
+							const info = await fs.lstat(p);
+							if (info.nlink > 1) {
+								// Hardlink: break the link so later chmod/cp can never touch another inode.
+								const data = await fs.readFile(p);
+								await fs.rm(p);
+								await fs.writeFile(p, data, { flag: "wx" });
+							}
+							await fs.chmod(p, info.mode & 0o755); // strip setuid/setgid/sticky and group/world write
+						}
+					}
+				};
+				await sanitize(out);
+				await fs.mkdir(destDir, { recursive: true });
+				await fs.rm(target, { recursive: true, force: true });
+				await fs.cp(path.join(out, name), target, { recursive: true, verbatimSymlinks: true });
+				return { kind: "directory" as const, remote: src, local: target, dropped };
 			} finally {
-				await fs.rm(tmp, { force: true });
+				await fs.rm(staging, { recursive: true, force: true });
 			}
 		}
-		let dest = path.resolve(localCwd, expandHome(localPath ?? path.posix.basename(src)));
-		if ((await fs.stat(dest).catch(() => undefined))?.isDirectory()) dest = path.join(dest, path.posix.basename(src));
+
+		let dest = path.resolve(localCwd, expandHome(localPath ?? name));
+		if ((await fs.stat(dest).catch(() => undefined))?.isDirectory()) dest = path.join(dest, name);
+		if ((await exists(dest)) && !(await confirmOverwrite(dest))) throw new Error("cancelled: target exists");
 		await fs.mkdir(path.dirname(dest), { recursive: true });
-		const res = await mvm.request(`/fs/read?path=${encodeURIComponent(src)}`);
-		await pipeline(Readable.fromWeb(res.body as never), createWriteStream(dest));
-		return { kind: "file" as const, remote: src, local: dest, bytes: st.size };
+		// Write next to the target, then rename: replaces (never follows) an existing symlink at dest.
+		const tmp = `${dest}.pi-mvm-${randomBytes(4).toString("hex")}.part`;
+		try {
+			const res = await mvm.request(`/fs/read?path=${encodeURIComponent(src)}`);
+			await pipeline(Readable.fromWeb(res.body as never), createWriteStream(tmp, { flags: "wx", mode: 0o644 }));
+			await fs.rename(tmp, dest);
+		} finally {
+			await fs.rm(tmp, { force: true });
+		}
+		return { kind: "file" as const, remote: src, local: dest, dropped: [] as string[] };
 	}
+
+	const overwritePrompt = (ctx: ExtensionContext) => (target: string) =>
+		ctx.hasUI
+			? ctx.ui.confirm("Overwrite local path?", `${target} already exists and will be replaced with data from the MicroVM.`)
+			: Promise.resolve(false);
+	const droppedNote = (dropped: string[]) =>
+		dropped.length ? ` (skipped ${dropped.length} link/special file(s): ${dropped.slice(0, 5).join(", ")}${dropped.length > 5 ? ", …" : ""})` : "";
 
 	/** Split "a b" / quoted args for commands. */
 	const splitArgs = (s: string) => (s.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((a) => a.replace(/^["']|["']$/g, ""));
@@ -451,8 +520,8 @@ export default function (pi: ExtensionAPI) {
 			const [remote, local] = splitArgs(args);
 			if (!remote) return ctx.ui.notify("Usage: /mvm-download <remote-path> [local-path]", "warning");
 			try {
-				const r = await download(remote, local);
-				ctx.ui.notify(`Downloaded ${r.kind} ${r.remote} → ${r.local}`, "info");
+				const r = await download(remote, local, overwritePrompt(ctx));
+				ctx.ui.notify(`Downloaded ${r.kind} ${r.remote} → ${r.local}${droppedNote(r.dropped)}`, "info");
 			} catch (err) {
 				ctx.ui.notify(`Download failed: ${(err as Error).message}`, "error");
 			}
@@ -532,23 +601,84 @@ export default function (pi: ExtensionAPI) {
 				local = await ctx.ui.input("Local destination:", dest);
 				if (!local) return { content: [{ type: "text", text: "The user declined the download." }], details: undefined };
 			}
-			const r = await download(params.remotePath, local);
-			return { content: [{ type: "text", text: `The user downloaded ${r.kind} ${r.remote}.` }], details: undefined };
+			try {
+				const r = await download(params.remotePath, local, overwritePrompt(ctx));
+				return {
+					content: [{ type: "text", text: `The user downloaded ${r.kind} ${r.remote}.${droppedNote(r.dropped)}` }],
+					details: undefined,
+				};
+			} catch (err) {
+				if ((err as Error).message.startsWith("cancelled")) {
+					return { content: [{ type: "text", text: "The user declined to overwrite the existing local path." }], details: undefined };
+				}
+				throw err;
+			}
 		},
 	});
+
+	// --- /mvm init -------------------------------------------------------------------------------
+
+	async function runInit(args: string[], ctx: ExtensionCommandContext) {
+		const opts = parseInitArgs(args);
+		ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", "MicroVM: init – checking AWS account…"));
+		const plan = await planInit(opts);
+		if (!(await ctx.ui.confirm("Set up Lambda MicroVM?", describePlan(plan)))) {
+			return ctx.ui.setStatus(STATUS_KEY, undefined);
+		}
+		try {
+			const result = await executeInit(plan, {
+				step: (text) => {
+					ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `MicroVM: init – ${text}`));
+					ctx.ui.setWidget("mvm-init", [ctx.ui.theme.fg("accent", `/mvm init: ${text}`)]);
+				},
+				signal: ctx.signal,
+			});
+			const settingsFile = path.join(getAgentDir(), "settings.json");
+			await saveInitResult(settingsFile, result);
+			if (!env.PI_MVM_IMAGE) mvm.configure(result.imageArn, result.image.version, result.image.region);
+			ctx.ui.notify(
+				[
+					`MicroVM image ready: ${result.imageArn} (version ${result.image.version ?? "latest"})`,
+					`Saved to ${settingsFile} (extensionSettings.microvmArn / microvmImage).`,
+					env.PI_MVM_IMAGE ? "Note: PI_MVM_IMAGE is set and overrides this setting." : "",
+					mvm.id ? "The current MicroVM still runs the old image; /mvm new starts one from the new image." : "",
+				]
+					.filter(Boolean)
+					.join("\n"),
+				"info",
+			);
+			if (!mvm.id) void warmUp(ctx);
+			else ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", `MicroVM: ${mvm.id}`));
+		} catch (err) {
+			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "MicroVM: init failed"));
+			throw err;
+		} finally {
+			ctx.ui.setWidget("mvm-init", undefined);
+		}
+	}
+
+	function warmUp(ctx: ExtensionContext) {
+		return mvm.ensure().catch((err) => {
+			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "MicroVM: error"));
+			ctx.ui.notify(`Lambda MicroVM unavailable: ${(err as Error).message}`, "error");
+		});
+	}
 
 	// --- lifecycle command ---------------------------------------------------------------------
 
 	pi.registerCommand("mvm", {
-		description: "Lambda MicroVM: /mvm [status|suspend|resume|terminate|new]",
+		description: "Lambda MicroVM: /mvm [init|status|suspend|resume|terminate|new]",
 		getArgumentCompletions: (prefix) =>
-			["status", "suspend", "resume", "terminate", "new"]
-				.filter((s) => s.startsWith(prefix))
-				.map((s) => ({ value: s, label: s })),
+			SUBCOMMANDS.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
-			const sub = args.trim() || "status";
+			const [sub = "status", ...rest] = splitArgs(args);
+			if (sub !== "init" && !mvm.image) {
+				return ctx.ui.notify("Lambda MicroVM is not set up yet. Run /mvm init first.", "warning");
+			}
 			try {
 				switch (sub) {
+					case "init":
+						return await runInit(rest, ctx);
 					case "status": {
 						const d = await mvm.describe();
 						if (!d) return ctx.ui.notify("No MicroVM yet (one is launched on first use).", "info");
@@ -556,7 +686,7 @@ export default function (pi: ExtensionAPI) {
 							[
 								`MicroVM: ${d.microvmId} (${d.state}${d.stateReason ? `: ${d.stateReason}` : ""})`,
 								`Endpoint: ${d.endpoint}`,
-								`Image: ${d.imageArn} v${d.imageVersion}  (configured: ${mvm.image})`,
+								`Image: ${d.imageArn} v${d.imageVersion}  (configured: ${mvm.image} v${mvm.imageVersion ?? "latest"})`,
 								`Started: ${d.startedAt?.toISOString?.() ?? "-"}`,
 								`Idle policy: suspend after ${d.idlePolicy?.maxIdleDurationSeconds}s idle, terminate after ${d.idlePolicy?.suspendedDurationSeconds}s suspended`,
 								`Workspace: ${REMOTE_CWD}   On exit: ${ON_EXIT}`,
@@ -588,7 +718,10 @@ export default function (pi: ExtensionAPI) {
 						return;
 					}
 					default:
-						ctx.ui.notify("Usage: /mvm [status|suspend|resume|terminate|new]", "warning");
+						ctx.ui.notify(
+							`Usage: /mvm [init|status|suspend|resume|terminate|new]\n  ${INIT_USAGE}`,
+							"warning",
+						);
 				}
 			} catch (err) {
 				ctx.ui.notify(`MicroVM ${sub} failed: ${(err as Error).message}`, "error");
@@ -601,18 +734,21 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		uiCtx = ctx;
 		if (!env.PI_MVM_IMAGE) {
-			mvm.image = imageFromSettings(pi.getSettings()) ?? DEFAULT_IMAGE;
+			const saved = imageFromSettings(pi.getSettings());
+			mvm.configure(saved?.arn ?? DEFAULT_IMAGE, saved?.image?.version, saved?.image?.region);
 		}
 		let saved: Partial<MicrovmIdentity> | undefined;
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type === "custom" && entry.customType === ENTRY_TYPE) saved = entry.data as Partial<MicrovmIdentity>;
 		}
 		if (saved?.microvmId && saved.secret) mvm.attach(saved as MicrovmIdentity);
+		if (!mvm.image) {
+			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("warning", "MicroVM: not set up – run /mvm init"));
+			ctx.ui.notify("Lambda MicroVM extension: run /mvm init to create the sandbox image in your AWS account.", "warning");
+			return;
+		}
 		// Warm up in the background so the first tool call is fast.
-		mvm.ensure().catch((err) => {
-			ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("error", "MicroVM: error"));
-			ctx.ui.notify(`Lambda MicroVM unavailable: ${(err as Error).message}`, "error");
-		});
+		void warmUp(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
