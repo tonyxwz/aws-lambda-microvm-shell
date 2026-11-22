@@ -10,7 +10,7 @@
  *   request_upload / request_download tools: the agent asks, the user approves in the UI
  *   /mvm [status|suspend|resume|terminate|new]
  *
- * Config: settings.json `extensionSettings.microvmArn` (MicroVM image ARN, written by scripts/build-image.sh).
+ * Config: settings.json `extensionSettings["pi-lambda-microvm"].microvmArn` (MicroVM image ARN, written by /mvm init).
  * Env overrides: PI_MVM_IMAGE, AWS_REGION/AWS_PROFILE, PI_MVM_IDLE_SECONDS, PI_MVM_SUSPENDED_SECONDS,
  *   PI_MVM_MAX_DURATION_SECONDS, PI_MVM_EGRESS, PI_MVM_EXECUTION_ROLE_ARN, PI_MVM_ON_EXIT
  */
@@ -47,7 +47,7 @@ import {
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { describePlan, executeInit, INIT_USAGE, parseInitArgs, planInit, type SavedImage, saveInitResult } from "./init.ts";
+import { describePlan, executeInit, INIT_USAGE, imageFromSettings, parseInitArgs, planInit, saveInitResult } from "./init.ts";
 import { HttpError, Microvm, type MicrovmIdentity, UPLOAD_CHUNK, UPLOAD_PARALLEL } from "./microvm.ts";
 
 const execFileP = promisify(execFile);
@@ -114,15 +114,6 @@ function remoteCtx<T extends { cwd: string }>(ctx: T): T {
 /** Empty = not set up yet; the user runs /mvm init. */
 const DEFAULT_IMAGE = "";
 const SUBCOMMANDS = ["init", "status", "suspend", "resume", "terminate", "new"];
-
-/** Image written by /mvm init: extensionSettings.microvmArn + extensionSettings.microvmImage. */
-function imageFromSettings(settings: unknown): { arn: string; image?: Partial<SavedImage> } | undefined {
-	const ext = (settings as { extensionSettings?: Record<string, unknown> })?.extensionSettings;
-	const arn = typeof ext?.microvmArn === "string" ? ext.microvmArn.trim() : "";
-	if (!arn) return undefined;
-	const image = ext?.microvmImage && typeof ext.microvmImage === "object" ? (ext.microvmImage as Partial<SavedImage>) : undefined;
-	return { arn, image };
-}
 
 // ---------------------------------------------------------------------------------------------
 // extension
@@ -639,7 +630,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(
 				[
 					`MicroVM image ready: ${result.imageArn} (version ${result.image.version ?? "latest"})`,
-					`Saved to ${settingsFile} (extensionSettings.microvmArn / microvmImage).`,
+					`Saved to ${settingsFile} (extensionSettings["pi-lambda-microvm"]).`,
 					env.PI_MVM_IMAGE ? "Note: PI_MVM_IMAGE is set and overrides this setting." : "",
 					mvm.id ? "The current MicroVM still runs the old image; /mvm new starts one from the new image." : "",
 				]

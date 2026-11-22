@@ -44,11 +44,15 @@ The result is saved to `~/.pi/agent/settings.json`, and every later session laun
 ```json
 {
   "extensionSettings": {
-    "microvmArn": "arn:aws:lambda:us-east-2:123456789012:microvm-image:pi-agent-sandbox",
-    "microvmImage": { "version": "1.0", "region": "us-east-2", "architecture": "ARM_64", "memoryMiB": 2048, "nodeVersion": "lts", "builtAt": "…" }
+    "pi-lambda-microvm": {
+      "microvmArn": "arn:aws:lambda:us-east-2:123456789012:microvm-image:pi-agent-sandbox",
+      "microvmImage": { "version": "1.0", "region": "us-east-2", "architecture": "ARM_64", "memoryMiB": 2048, "nodeVersion": "lts", "builtAt": "…" }
+    }
   }
 }
 ```
+
+Existing flat `microvmArn` and `microvmImage` settings still work when the namespace is absent. The next successful `/mvm init` moves them into the namespace.
 
 Options: `/mvm init [--region R] [--arch arm64|x86_64] [--memory 512|1024|2048|4096|8192] [--name N] [--node lts|vX.Y.Z]`.
 Run it again to rebuild, for example to pick up a new Node.js LTS or base-image patches. Then run `/mvm new`
@@ -81,7 +85,7 @@ There is one exception: skill files listed in the system prompt (`<skills>`) are
 
 | Setting / env | Default |
 |---|---|
-| `extensionSettings.microvmArn` / `microvmImage` | written by `/mvm init` |
+| `microvmArn` / `microvmImage` in `extensionSettings["pi-lambda-microvm"]` | written by `/mvm init` |
 | `PI_MVM_IMAGE` (image ARN; overrides the settings and uses the latest version) | |
 | `PI_MVM_EGRESS` (`INTERNET_EGRESS`, a VPC connector ARN, or `none`) | `INTERNET_EGRESS` |
 | `PI_MVM_EXECUTION_ROLE_ARN` (AWS permissions *inside* the VM) | none |

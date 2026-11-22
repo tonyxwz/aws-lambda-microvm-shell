@@ -1,6 +1,6 @@
 {
   "name": "pi-lambda-microvm",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "pi extension: replace the agent's local shell and file tools with an isolated AWS Lambda MicroVM",
   "keywords": [
     "pi-package",

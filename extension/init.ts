@@ -5,8 +5,7 @@
  *   2. zip the bundled image/ folder (Dockerfile + server.js) and upload it to S3
  *   3. CreateMicrovmImage / UpdateMicrovmImage; Lambda runs the Dockerfile and snapshots the VM
  *   4. save the result to ~/.pi/agent/settings.json:
- *        extensionSettings.microvmArn    image ARN
- *        extensionSettings.microvmImage  { version, region, architecture, memoryMiB, nodeVersion, builtAt }
+ *        extensionSettings["pi-lambda-microvm"] holds microvmArn and microvmImage.
  */
 
 import { randomBytes } from "node:crypto";
@@ -51,7 +50,9 @@ export interface InitPlan extends InitOptions {
 	imageArn: string;
 }
 
-/** Saved under extensionSettings.microvmImage. */
+const SETTINGS_KEY = "pi-lambda-microvm";
+
+/** Metadata for the saved MicroVM image. */
 export interface SavedImage {
 	version?: string;
 	region: string;
@@ -206,7 +207,7 @@ export function describePlan(p: InitPlan): string {
 		`• MicroVM image ${p.name}: ${p.arch}, ${p.memoryMiB} MiB baseline, Node.js ${p.nodeVersion}`,
 		"",
 		"Lambda builds the bundled Dockerfile remotely (about 2 minutes). The result is saved to",
-		"~/.pi/agent/settings.json (extensionSettings.microvmArn / microvmImage).",
+		'~/.pi/agent/settings.json (extensionSettings["pi-lambda-microvm"]).',
 	].join("\n");
 }
 
@@ -395,6 +396,16 @@ export async function executeInit(p: InitPlan, io: InitIO): Promise<InitResult> 
 	}
 }
 
+export function imageFromSettings(settings: unknown): { arn: string; image?: Partial<SavedImage> } | undefined {
+	const ext = (settings as { extensionSettings?: Record<string, unknown> } | null)?.extensionSettings;
+	// Prefer the namespace as a unit; never pair its ARN with legacy image metadata.
+	const value = (ext?.[SETTINGS_KEY] ?? ext) as Record<string, unknown> | undefined;
+	const arn = typeof value?.microvmArn === "string" ? value.microvmArn.trim() : "";
+	if (!arn) return undefined;
+	const image = value?.microvmImage;
+	return { arn, image: image && typeof image === "object" ? image as Partial<SavedImage> : undefined };
+}
+
 /** Persist the init result in the global pi settings file (other settings are preserved). */
 export async function saveInitResult(settingsFile: string, result: InitResult): Promise<void> {
 	let settings: Record<string, unknown> = {};
@@ -406,7 +417,11 @@ export async function saveInitResult(settingsFile: string, result: InitResult): 
 		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
 	}
 	const ext = (settings.extensionSettings as Record<string, unknown> | undefined) ?? {};
-	settings.extensionSettings = { ...ext, microvmArn: result.imageArn, microvmImage: result.image };
+	const { microvmArn: _legacyArn, microvmImage: _legacyImage, ...other } = ext;
+	settings.extensionSettings = {
+		...other,
+		[SETTINGS_KEY]: { ...(ext[SETTINGS_KEY] as Record<string, unknown>), microvmArn: result.imageArn, microvmImage: result.image },
+	};
 	await fs.mkdir(path.dirname(settingsFile), { recursive: true });
 	const tmp = `${settingsFile}.${process.pid}.tmp`;
 	await fs.writeFile(tmp, `${JSON.stringify(settings, null, 2)}\n`, { mode });

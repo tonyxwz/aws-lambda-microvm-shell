@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.2] - 2026-11-22
+
+- Store image settings under `extensionSettings["pi-lambda-microvm"]`. Existing flat settings remain readable and are migrated on the next successful `/mvm init`.
+
 ## [0.1.0] - 2026-11-21
 
 Initial release.

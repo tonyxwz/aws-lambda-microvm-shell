@@ -165,7 +165,7 @@ export class Microvm {
 	private async launch(signal?: AbortSignal, reason?: string): Promise<void> {
 		if (!this.cfg.image) {
 			throw new Error(
-				"Lambda MicroVM is not set up: no MicroVM image configured. Ask the user to run /mvm init (or set extensionSettings.microvmArn).",
+				'Lambda MicroVM is not set up: no MicroVM image configured. Ask the user to run /mvm init (or set extensionSettings["pi-lambda-microvm"].microvmArn).',
 			);
 		}
 		const replaced = this.identity?.microvmId;
