@@ -1,6 +1,6 @@
 {
   "name": "pi-lambda-microvm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "pi extension: replace the agent's local shell and file tools with an isolated AWS Lambda MicroVM",
   "keywords": [
     "pi-package",
@@ -15,9 +15,9 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tonyxwz/aws-lambda-microvm-shell.git"
+    "url": "git+https://github.com/tonyxwz/pi-lambda-microvm.git"
   },
-  "homepage": "https://github.com/tonyxwz/aws-lambda-microvm-shell#readme",
+  "homepage": "https://github.com/tonyxwz/pi-lambda-microvm#readme",
   "files": [
     "extension/*.ts",
     "image/",
