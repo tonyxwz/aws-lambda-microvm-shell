@@ -1,4 +1,4 @@
-# pi × AWS Lambda MicroVM shell
+# pi × AWS Lambda MicroVM Sandbox
 
 A [pi](https://pi.dev) extension that moves all of the agent's tools into a dedicated
 [AWS Lambda MicroVM](https://aws.amazon.com/lambda/lambda-microvms/) (Firecracker). With it loaded, the agent
